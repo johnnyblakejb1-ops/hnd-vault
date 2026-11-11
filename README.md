@@ -14,10 +14,12 @@ Alain + Bea, living on GitHub — the cambook HND pipeline that runs itself.
   new PDFs, commits them, uploads the `hnd-pdfs` artifact.
 
 ## Two ways Alain captures
-1. **On GitHub** — Actions → **alain-scrape** → Run workflow → set `max_links` to 3
-   for a first drive. Works only if Scribd accepts GitHub's runner IPs (test it).
-2. **On your home PC** (always works) — clone this repo, run `python alain.py`
-   inside it, then double-click **capture.bat**. Bea stitches automatically.
+1. **On GitHub** — Actions → **alain-scrape** → Run workflow. Scribd currently
+   blocks GitHub's runner IPs (verified 2026-11-11), so this is a probe only.
+2. **On your home PC** (the one that works) — clone this repo, then
+   **double-click `run_alain.bat`**: Alain captures with your Edge, pushes the
+   screenshots, and Bea stitches automatically a minute later. Ctrl+C stops
+   Alain anytime; `run_alain.bat` again resumes where he left off.
 
 ## Where things land
 - `screenshots/` — kept paper pages · `screenshots/review/` — suspects

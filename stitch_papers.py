@@ -149,7 +149,9 @@ def main():
         groups.setdefault((m.group(1), m.group(2)), []).append((int(m.group(3)), f))
 
     if not groups:
-        raise SystemExit(f"No screenshot pages matching <docid>_<title>_p<N>.png in '{src}'.")
+        print(f"No screenshot pages matching <docid>_<title>_p<N>.png in '{src}'.\n"
+              f"Bea idles — nothing stitched yet. (Alain hasn't captured anything.)")
+        return
 
     rows = []
     for (doc_id, slug), items in sorted(groups.items()):

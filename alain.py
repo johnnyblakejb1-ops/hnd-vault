@@ -58,6 +58,7 @@ JITTER_SECONDS = 2               # random 0-2s added to each pause (less robotic
 MAX_LINKS_TO_FOLLOW = int(os.environ.get("ALAIN_MAX_LINKS", MAX_LINKS_TO_FOLLOW))
 PAGES_PER_DOC = int(os.environ.get("ALAIN_PAGES_PER_DOC", PAGES_PER_DOC))
 TIME_CAP_MINUTES = float(os.environ.get("ALAIN_TIME_CAP", "0"))   # 0 = no time cap
+BROWSER_CHANNEL = os.environ.get("ALAIN_BROWSER_CHANNEL", "")    # e.g. "msedge" = reuse your Edge
 
 # ---- v2 filters (edit freely) ----
 REQUIRED_KEYWORDS = ["hnd"]      # topic: document title must contain one of these
@@ -312,8 +313,8 @@ def main():
     started = time.time()
 
     with sync_playwright() as p:
-        # Bundled Chromium — works the same on your PC, in the sandbox, on Actions
-        browser = p.chromium.launch(headless=HEADLESS)
+        # Bundled Chromium by default; set ALAIN_BROWSER_CHANNEL=msedge to reuse your Edge
+        browser = p.chromium.launch(headless=HEADLESS, channel=BROWSER_CHANNEL or None)
         context = browser.new_context(
             viewport={"width": 1100, "height": 1500},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
