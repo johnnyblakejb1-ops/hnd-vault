@@ -158,31 +158,52 @@ def looks_like_junk(txt, png_path):
 # ─────────── the browser ───────────
 
 def launch_browser(p):
-    """Edge first (already on your PC, zero download), then Chrome,
-    then bundled Chromium. Returns (context, channel-name)."""
-    prefs = [BROWSER_CHANNEL] if BROWSER_CHANNEL else ["msedge", "chrome", None]
+    """Try, in order: (1) the default/bundled browser exactly like v2.1
+    (proven to open on your PC — no 'channel' keyword used), (2) Edge,
+    (3) Chrome. Returns (context, name)."""
+    LAUNCH_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                 "AppleWebKit/537.36 (KHTML, like Gecko) "
+                 "Chrome/126.0.0.0 Safari/537.36")
     last_err = None
-    for ch in prefs:
+
+    if not BROWSER_CHANNEL:
+        # 1) v2.1-style launch — no channel keyword at all. Oldest & safest.
+        try:
+            ctx = p.chromium.launch_persistent_context(
+                user_data_dir=str(PROFILE_DIR),
+                headless=HEADLESS,
+                viewport={"width": 1100, "height": 1500},
+                user_agent=LAUNCH_UA,
+            )
+            print("   [browser] started (default browser)")
+            return ctx, "bundled"
+        except Exception as e:
+            last_err = e
+            print(f"   [browser] default launch failed "
+                  f"({str(e).splitlines()[0][:80]})")
+
+    # 2) and 3) Edge / Chrome via channel keyword (needs newer playwright)
+    for ch, label in (("msedge", "Edge"), ("chrome", "Chrome")):
+        if BROWSER_CHANNEL and ch != BROWSER_CHANNEL:
+            continue
         try:
             ctx = p.chromium.launch_persistent_context(
                 user_data_dir=str(PROFILE_DIR),
                 headless=HEADLESS,
                 channel=ch,
                 viewport={"width": 1100, "height": 1500},
-                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/126.0.0.0 Safari/537.36"),
+                user_agent=LAUNCH_UA,
             )
-            name = ch or "bundled-chromium"
-            print(f"   [browser] started {'Edge' if ch == 'msedge' else name}")
-            return ctx, name
+            print(f"   [browser] started {label}")
+            return ctx, ch
         except Exception as e:
             last_err = e
-            print(f"   [browser] {ch or 'bundled-chromium'} not available "
+            print(f"   [browser] {label} not available "
                   f"({str(e).splitlines()[0][:80]})")
+
     raise SystemExit(
-        "\nAlain couldn't start any browser (tried Edge, Chrome, Chromium).\n"
-        "Fix — install the bundled browser once:\n"
+        "\nAlain couldn't start any browser.\n"
+        "Fix — install his bundled browser once:\n"
         "    python -m playwright install chromium\n"
         f"Last error was: {last_err}"
     )
