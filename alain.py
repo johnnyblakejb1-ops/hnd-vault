@@ -1,128 +1,124 @@
 """
-Alain — Scribd document screenshotter (UNLIMITED + FOCUSED + SEARCH MODE, v2)
------------------------------------------------------------------------------
-Alain works completely on his own:
-  1. SEARCHES Scribd for your keywords and stocks his queue with results
-  2. Opens each document, scrolls the viewer, screenshots every page
-  3. Finds links to other on-topic documents, visits them, and repeats
-  4. NEVER STOPS until you press Ctrl+C
+Alain v3 — the Scribd Paper Camera (you pick, he shoots)
+=========================================================
+1. Alain opens Scribd in a VISIBLE browser window (your Edge if you
+   have it — no big downloads; otherwise bundled Chromium).
+2. YOU search, browse, open the paper you want, and eyeball it.
+3. Press ENTER in the console: Alain shoots every page of the clean
+   embed view (falls back to the page you're viewing if Scribd walls it),
+   judges every page (advert pages go to screenshots/review/ — nothing
+   is ever deleted), names every keeper  <docid>_<slug>_p<N>.png  in
+   screenshots/ — exactly the naming Bea (the stitcher) expects — and
+   binds the keepers into a preview PDF in scribd_papers/.
+4. Double-click capture.bat afterwards: screenshots go to GitHub,
+   Bea stitches the branded pink-paper PDFs automatically.
 
-NEW IN V2 — Alain learned to tell papers from jargon:
-  1. TITLE BOUNCER: documents titled like guides/brochures/adverts
-     ("hda-hnd-progression-guide", "admission brochure"...) never enter the queue.
-  2. PAGE JUDGE: before keeping a screenshot he reads the page's own text
-     (free — no OCR needed). Adverts talk about "university, admission, IELTS,
-     www" — real papers talk about "instructions, answer all, paper, marks".
-     Suspect pages go to screenshots/review/ — NOTHING is ever deleted.
-  3. If a page has no text layer (pure scan), he judges the picture instead:
-     colourful = flyer, mostly plain = paper.
-  4. Resume still works — docs already captured (even only in review/) are skipped.
+Console commands:
+    ENTER      shoot the document you're viewing right now
+    goto URL   drive the browser somewhere else
+    list       show what's captured so far
+    q          finish (writes alain_manifest.json)
 
 Setup (one time):
     pip install playwright pillow
-    playwright install chromium
-    (On GitHub Actions the workflows do all of this automatically.)
+    No browser download needed — Alain uses your Edge.
+    (pymupdf is optional; only the local preview PDF needs it.)
 
-Run:
-    python alain.py
-Tip: set MAX_LINKS_TO_FOLLOW = 5 for a first test drive, watch how many pages
-land in review/ vs main folder, then put it back to 0.
+Notes:
+  * Optional: log into YOUR Scribd account inside Alain's window —
+    the login is remembered in alain_profile/ and that folder NEVER
+    leaves your PC (it is git-ignored).
+  * He captures exactly what Scribd shows you: a page blurred for
+    free visitors stays blurred.
 """
 
+import json
 import os
-import random
 import re
+import shutil
+import sys
 import time
+import urllib.parse
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ================= SETTINGS (edit these) =================
-START_URL = "https://www.scribd.com/document/819844284/hnd-2023-CSN-Past-questions"
-PAGE_SELECTOR = ".outer_page"    # CSS selector for one document page
-PAGES_PER_DOC = 0                # 0 = EVERY page | 1, 2, 3... = just that many
-MAX_LINKS_TO_FOLLOW = 0          # 0 = NO LIMIT, all links forever! | 10, 20... = cap it
-SEARCH_QUERIES = [               # Alain searches Scribd for these FIRST
-    "hnd past questions",
-    "hnd past questions cameroon",
-    "hnd past paper",
-]
-IDLE_PATIENCE = 5                # 'still nothing new?' checks before Alain stops scrolling
-OUTPUT_DIR = Path("screenshots")
-REVIEW_DIR = OUTPUT_DIR / "review"   # suspect pages land here (never deleted)
-HEADLESS = True                  # False = watch Alain work on your screen
-DELAY_SECONDS = 5                # pause between documents (bigger = safer)
-JITTER_SECONDS = 2               # random 0-2s added to each pause (less robotic)
+# never let a console encoding kill the run (Windows code pages!)
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
-# ---- GitHub Actions overrides (env vars beat the settings above) ----
-MAX_LINKS_TO_FOLLOW = int(os.environ.get("ALAIN_MAX_LINKS", MAX_LINKS_TO_FOLLOW))
-PAGES_PER_DOC = int(os.environ.get("ALAIN_PAGES_PER_DOC", PAGES_PER_DOC))
-TIME_CAP_MINUTES = float(os.environ.get("ALAIN_TIME_CAP", "0"))   # 0 = no time cap
-BROWSER_CHANNEL = os.environ.get("ALAIN_BROWSER_CHANNEL", "")    # e.g. "msedge" = reuse your Edge
+# ═══════════ SETTINGS (edit these) ═══════════
+START_URL = "https://www.scribd.com/"
 
-# ---- v2 filters (edit freely) ----
-REQUIRED_KEYWORDS = ["hnd"]      # topic: document title must contain one of these
-JUNK_TITLE_WORDS = [             # titles with any of these = guide/advert, not a paper
-    "guide", "brochure", "admission", "admissions", "progression", "prospectus",
-    "syllabus", "timetable", "result", "results", "flyer", "poster",
-    "scholarship", "project", "textbook", "handout", "notes", "summary",
-    "top-up", "topup", "requirements", "course-outline",
-]
-TITLE_MUST_HAVE = []             # optional extra strictness, e.g.
-                                 # ["past", "question", "exam", "paper"]
-FILTER_PAGES = True              # True = Alain judges every page before keeping it
+OUTPUT_DIR = Path("screenshots")          # keeper pages (Bea reads this)
+REVIEW_DIR = OUTPUT_DIR / "review"        # suspect pages (never deleted)
+PDF_DIR = Path("scribd_papers")           # local preview PDFs (not uploaded)
+PROFILE_DIR = Path("alain_profile")       # your Scribd login (not uploaded)
 
-JUNK_PAGE_WORDS = [              # the vocabulary of adverts
+HEADLESS = os.environ.get("ALAIN_HEADLESS", "") != "1"   # pick mode: keep visible
+BROWSER_CHANNEL = os.environ.get("ALAIN_BROWSER_CHANNEL", "")  # "", msedge, chrome
+
+PAGE_SELECTOR = ".outer_page"     # one document page in the viewer
+PAGES_PER_DOC = int(os.environ.get("ALAIN_PAGES_PER_DOC", "0"))  # 0 = every page
+IDLE_PATIENCE = 5                 # 'no new pages loading?' checks before stopping
+RENDER_WAIT = 1500                # ms to let each page render before shooting
+KEEP_IMAGES = False               # True = also copy per-page PNGs next to the PDF
+
+DOC_URL_RE = re.compile(r"scribd\.com/(?:document|embeds)/(\d+)")
+
+# ---- page judge (from Alain v2 — machine checks what the eye might miss) ----
+FILTER_PAGES = True               # advert-looking pages -> review/ even in a chosen doc
+JUNK_PAGE_WORDS = [
     "university", "admission", "apply now", "apply here", "ielts", "scholarship",
     "tuition", "study abroad", "campus", "www.", "http", "whatsapp", "click here",
     "follow us", "subscribe", "sign up", "enrol", "brochure", "telegram",
     "facebook", "instagram", "tutorials", "register now", "hotline", "call now",
 ]
-EXAM_PAGE_WORDS = [              # the vocabulary of real papers
+EXAM_PAGE_WORDS = [
     "question", "paper", "answer", "instruction", "marks", "section",
     "candidate", "examination", "diploma", "hnd", "semester", "time allowed",
     "duration", "ministry", "republic", "subject", "series",
 ]
-# =========================================================
+# ═══════════════════════════════════════════
 
-DOCUMENT_LINK = re.compile(r"^https?://(?:www\.)?scribd\.com/document/(\d+)")
+CAPTURED = []   # running log for alain_manifest.json
+
+
+# ─────────── helpers ───────────
+
+def settle(page):
+    """Wait until a page has stopped navigating before touching it."""
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+    page.wait_for_timeout(700)
 
 
 def doc_id_from(url):
-    m = re.search(r"/document/(\d+)", url)
+    m = DOC_URL_RE.search(url or "")
     return m.group(1) if m else None
 
 
-def slugify(text):
-    text = re.sub(r"[^\w\s-]", "", text).strip().lower()
-    return re.sub(r"[\s_-]+", "-", text)[:60] or "doc"
+def title_slug(url):
+    path = urllib.parse.urlparse(url).path.rstrip("/")
+    slug = path.split("/")[-1]
+    slug = re.sub(r"[^\w\-]", "-", slug).strip("-").lower()
+    return slug[:70] or "paper"
 
 
-def title_from_url(url):
-    """Pull the document's real name out of its URL."""
-    m = re.search(r"/document/\d+/([^/?#]+)", url)
-    if m and m.group(1):
-        return slugify(m.group(1))
-    return "doc"
-
-
-def word_hit(word, name):
-    """Does `word` start any hyphen-separated chunk of `name`?"""
-    return ("-" + word) in ("-" + name)
-
-
-def matches_filter(url):
-    """v2 bouncer: on-topic, not junk-titled, (optionally) must contain a keyword."""
-    name = title_from_url(url)
-    if REQUIRED_KEYWORDS and not any(
-        word_hit(kw.lower().replace(" ", "-"), name) for kw in REQUIRED_KEYWORDS
-    ):
-        return False
-    if any(word_hit(w, name) for w in JUNK_TITLE_WORDS):
-        return False
-    if TITLE_MUST_HAVE and not any(word_hit(w, name) for w in TITLE_MUST_HAVE):
-        return False
-    return True
+def next_free(path):
+    """scribd_papers/foo.pdf, foo_2.pdf, foo_3.pdf ..."""
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    n = 2
+    while (path.parent / f"{stem}_{n}{suffix}").exists():
+        n += 1
+    return path.parent / f"{stem}_{n}{suffix}"
 
 
 def picture_is_junk(png_path):
@@ -143,7 +139,7 @@ def picture_is_junk(png_path):
 
 
 def looks_like_junk(txt, png_path):
-    """Returns a reason string if the page smells like an advert, '' if it's a keeper."""
+    """Returns a reason string if the page smells like an advert, '' if keeper."""
     t = (txt or "").strip().lower()
     if len(t) >= 25:
         junk = sum(1 for w in JUNK_PAGE_WORDS if w in t)
@@ -159,60 +155,77 @@ def looks_like_junk(txt, png_path):
     return ""
 
 
-def embed_url(doc_id):
-    return f"https://www.scribd.com/embeds/{doc_id}/content?start_page=1"
+# ─────────── the browser ───────────
+
+def launch_browser(p):
+    """Edge first (already on your PC, zero download), then Chrome,
+    then bundled Chromium. Returns (context, channel-name)."""
+    prefs = [BROWSER_CHANNEL] if BROWSER_CHANNEL else ["msedge", "chrome", None]
+    last_err = None
+    for ch in prefs:
+        try:
+            ctx = p.chromium.launch_persistent_context(
+                user_data_dir=str(PROFILE_DIR),
+                headless=HEADLESS,
+                channel=ch,
+                viewport={"width": 1100, "height": 1500},
+                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/126.0.0.0 Safari/537.36"),
+            )
+            name = ch or "bundled-chromium"
+            print(f"   [browser] started {'Edge' if ch == 'msedge' else name}")
+            return ctx, name
+        except Exception as e:
+            last_err = e
+            print(f"   [browser] {ch or 'bundled-chromium'} not available")
+    raise SystemExit(
+        "\nAlain couldn't start any browser (tried Edge, Chrome, Chromium).\n"
+        "Fix — install the bundled browser once:\n"
+        "    python -m playwright install chromium\n"
+        f"Last error was: {last_err}"
+    )
 
 
-def already_captured(doc_id):
-    """True if screenshots of this document already exist (resume superpower)."""
-    return any(OUTPUT_DIR.glob(f"{doc_id}_*")) or any(REVIEW_DIR.glob(f"{doc_id}_*"))
+# ─────────── shooting ───────────
 
+def shoot_pages(page, doc_id, slug, fallback_url=None):
+    """Screenshot every page. Prefer the clean embed view; if Scribd's
+    login wall hijacks it, fall back to the document page itself.
+    Keepers land in screenshots/ as <docid>_<slug>_p<N>.png (Bea-ready);
+    suspect pages go to screenshots/review/. Returns list of keeper paths."""
+    embed = f"https://www.scribd.com/embeds/{doc_id}/content?start_page=1"
 
-def harvest_links(hrefs, seen, queued_ids):
-    """Turn a pile of raw hrefs into a deduped, on-topic, brand-new shortlist."""
-    fresh = []
-    ignored = 0
-    for h in hrefs:
-        h = h.split("?")[0].split("#")[0]
-        m = DOCUMENT_LINK.match(h)
-        if not m:
-            continue
-        lid = m.group(1)
-        if lid in seen or lid in queued_ids:
-            continue
-        if not matches_filter(h):     # off-topic or junk-titled? Alain shrugs and moves on
-            ignored += 1
-            continue
-        fresh.append(h)
-        queued_ids.add(lid)
-    return fresh, ignored
+    try:
+        page.goto(embed, wait_until="domcontentloaded", timeout=60000)
+        settle(page)
+        if "auth.scribd.com" in page.url:            # bounced to login wall
+            print("   [lock] clean view needs a login — falling back...")
+            raise PermissionError("auth")
+    except Exception as e:
+        if fallback_url:
+            print(f"   [fallback] clean view blocked ({type(e).__name__}) — "
+                  f"shooting the page you were viewing instead")
+            try:
+                page.goto(fallback_url, wait_until="domcontentloaded",
+                          timeout=60000)
+                settle(page)
+            except Exception as e2:
+                print(f"   [!] couldn't return to the document page: {e2}")
+                return []
+        else:
+            print(f"   [!] clean view blocked and no fallback URL: {e}")
+            return []
 
+    try:
+        page.wait_for_selector(PAGE_SELECTOR, timeout=30000)
+    except PWTimeout:
+        print("   [lock] the document isn't rendering — it may need login.")
+        print("          -> log into YOUR Scribd account inside Alain's browser")
+        print("             window, reopen the paper, then press ENTER again.")
+        return []
 
-def search_scribd(page, query, seen, queued_ids):
-    """Alain searches Scribd directly instead of waiting for lucky links."""
-    url = f"https://www.scribd.com/search?query={query.replace(' ', '+')}"
-    print(f"\n[search] Alain hunts for: '{query}'")
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(3000)
-
-    for _ in range(4):
-        page.mouse.wheel(0, 2000)
-        page.wait_for_timeout(1500)
-
-    hrefs = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
-    fresh, ignored = harvest_links(hrefs, seen, queued_ids)
-    note = f" ({ignored} junk/off-topic bounced)" if ignored else ""
-    print(f"   found {len(fresh)} on-topic document(s){note}")
-    return fresh
-
-
-def screenshot_document(page, doc_id, pages_to_grab, doc_name):
-    """Alain opens a document in the embed viewer and screenshots its pages.
-    v2: every page is judged first — adverts/blank pages go to review/."""
-    page.goto(embed_url(doc_id), wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_selector(PAGE_SELECTOR, timeout=30000)
-
-    # Wait until page 1 has actually finished rendering (images loaded)
+    # wait for page 1's content to actually finish loading
     try:
         page.wait_for_function(
             """(sel) => {
@@ -226,29 +239,29 @@ def screenshot_document(page, doc_id, pages_to_grab, doc_name):
             timeout=15000,
         )
     except PWTimeout:
-        pass  # fall back to the fixed waits below
+        pass  # fixed waits below are the fallback
 
-    saved = 0
-    review = 0
+    keepers = []
     i = 0
     idle = 0
     while True:
         all_pages = page.locator(PAGE_SELECTOR)
         total = all_pages.count()
 
-        if i >= total:                    # no more pages loaded right now
+        if i >= total:                    # nothing new loaded right now
             idle += 1
-            if idle > IDLE_PATIENCE:      # waited long enough -> Alain is done
+            if idle > IDLE_PATIENCE:      # waited enough -> done
                 break
-            page.wait_for_timeout(1200)   # maybe the next batch is loading
+            page.wait_for_timeout(1200)   # maybe next batch is loading
             continue
 
         loc = all_pages.nth(i)
         try:
-            loc.scroll_into_view_if_needed()   # Alain scrolls, not you
-            page.wait_for_timeout(1500)        # let the page render
-            out = OUTPUT_DIR / f"{doc_id}_{doc_name}_p{i + 1}.png"
+            loc.scroll_into_view_if_needed()
+            page.wait_for_timeout(RENDER_WAIT)
+            out = OUTPUT_DIR / f"{doc_id}_{slug}_p{i + 1}.png"
             loc.screenshot(path=str(out))
+            print(f"   [shot] page {i + 1}")
 
             why = ""
             if FILTER_PAGES:
@@ -258,146 +271,211 @@ def screenshot_document(page, doc_id, pages_to_grab, doc_name):
                 except Exception:
                     pass
                 why = looks_like_junk(txt, out)
-
             if why:
                 out.replace(REVIEW_DIR / out.name)
-                review += 1
-                print(f"      page {i + 1} -> review/ ({why})")
+                print(f"   [review] page {i + 1} ({why})")
             else:
-                saved += 1
-                print(f"      saved {out.name}")
+                keepers.append(out)
         except Exception as e:
-            print(f"      ! page {i + 1} failed: {e}")
+            print(f"   [!] page {i + 1} failed: {e}")
 
         i += 1
-        if pages_to_grab and i >= pages_to_grab:
+        if PAGES_PER_DOC and i >= PAGES_PER_DOC:
             break
 
-    return saved, review
+    return keepers
 
 
-def collect_document_links(page, url):
-    """Alain opens the normal document page and gathers links to other documents."""
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(3000)  # let the 'related documents' sections render
+def images_to_pdf(pngs, pdf_path):
+    """Bind keeper pages into one preview PDF with PyMuPDF (optional)."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return None, "PyMuPDF not installed (pip install pymupdf) — preview PDF skipped, PNGs are safe"
 
-    return page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
+    out = fitz.open()
+    for png in pngs:
+        img = fitz.open(str(png))
+        pdf_bytes = img.convert_to_pdf()
+        img_pdf = fitz.open("pdf", pdf_bytes)
+        out.insert_pdf(img_pdf)
+        img_pdf.close()
+        img.close()
+    out.set_metadata({
+        "title": pdf_path.stem.replace("-", " "),
+        "producer": "Alain v3 — Scribd Paper Camera",
+    })
+    out.save(str(pdf_path), garbage=3, deflate=True)
+    out.close()
+    return pdf_path, None
 
 
-def find_new_links(page, url, seen, queued_ids):
-    """Collect links from a page — keep only new AND on-topic ones."""
-    hrefs = collect_document_links(page, url)
-    return harvest_links(hrefs, seen, queued_ids)
+# ─────────── the main action: ENTER ───────────
+
+def shoot_current(page):
+    """Shoot whatever document the browser is showing right now."""
+    settle(page)
+    url = page.url
+    doc_id = doc_id_from(url)
+
+    if not doc_id:
+        print(f"\n   You're on: {url[:70]}")
+        print("   This isn't a Scribd document page yet.")
+        print("   -> In the BROWSER: search / browse and OPEN the paper")
+        print("     (click through until you see the actual document),")
+        print("     then come back and press ENTER.")
+        return
+
+    slug = title_slug(url)
+    print(f"\n   Shooting document {doc_id} ({slug})")
+
+    keepers = shoot_pages(page, doc_id, slug, fallback_url=url)
+    if not keepers:
+        print("   [!] nothing kept this time.")
+        return
+
+    base = slug or f"scribd_{doc_id}"
+    pdf_path = next_free(PDF_DIR / f"{base}.pdf")
+    result, err = images_to_pdf(keepers, pdf_path)
+
+    print(f"\n   [OK] {len(keepers)} page(s) kept in screenshots/")
+    if err:
+        print(f"   [note] {err}")
+    else:
+        size_mb = pdf_path.stat().st_size / 1024 / 1024
+        print(f"   [OK] preview PDF: {pdf_path.name} ({size_mb:.1f}MB)")
+    CAPTURED.append({
+        "name": f"{base} ({len(keepers)}p)",
+        "pages": len(keepers),
+        "source_url": url,
+    })
+
+    if KEEP_IMAGES:
+        keep_dir = PDF_DIR / pdf_path.stem
+        keep_dir.mkdir(parents=True, exist_ok=True)
+        for n, png in enumerate(keepers, 1):
+            shutil.copy(png, keep_dir / f"page_{n:03d}.png")
+
+    # back to the document page you were on, so browsing continues
+    if not url.rstrip("/") == page.url.rstrip("/"):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            settle(page)
+        except Exception:
+            pass
+
+
+# ─────────── misc commands ───────────
+
+def show_saved():
+    pngs = [p for p in OUTPUT_DIR.glob("*.png")]
+    pdfs = sorted(PDF_DIR.glob("*.pdf"))
+    print(f"\n   [list] {len(pngs)} page PNG(s) in {OUTPUT_DIR}/ "
+          f"| {len(pdfs)} preview PDF(s) in {PDF_DIR}/")
+    for f in pdfs:
+        print(f"     - {f.name}  ({f.stat().st_size // 1024}KB)")
+
+
+def write_manifest():
+    manifest_path = OUTPUT_DIR / "alain_manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "site": START_URL,
+            "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "captures": CAPTURED,
+        }, f, indent=2, ensure_ascii=False)
+    print(f"\n{'=' * 50}")
+    print(f"Alain is done. {len(CAPTURED)} capture(s) this session.")
+    print(f"Keepers live in {OUTPUT_DIR}/  -> run capture.bat to push them.")
+    print(f"Manifest: {manifest_path}")
+    print(f"{'=' * 50}")
 
 
 def main():
+    print(r"""
+    +=================================================+
+    |   ALAIN v3 — THE SCRIBD PAPER CAMERA            |
+    |   You pick the paper. He shoots every page.     |
+    |   You see it first -> he turns it into a PDF.   |
+    +=================================================+
+""")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     REVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    PDF_DIR.mkdir(parents=True, exist_ok=True)
 
-    if not doc_id_from(START_URL):
-        raise SystemExit(f"Alain couldn't find a document ID in: {START_URL}")
+    try:
+        with sync_playwright() as p:
+            context, _ = launch_browser(p)
+            page = context.pages[0] if context.pages else context.new_page()
 
-    if REQUIRED_KEYWORDS and not matches_filter(START_URL):
-        print("note: your START_URL doesn't match your own keywords, "
-              "but Alain visits it anyway because YOU chose it.")
-
-    unlimited = (MAX_LINKS_TO_FOLLOW == 0)
-    max_total = None if unlimited else 1 + MAX_LINKS_TO_FOLLOW
-
-    queue = [START_URL]
-    queued_ids = {doc_id_from(START_URL)}
-    seen = set()
-    processed = 0
-    total_saved = 0
-    total_review = 0
-    started = time.time()
-
-    with sync_playwright() as p:
-        # Bundled Chromium by default; set ALAIN_BROWSER_CHANNEL=msedge to reuse your Edge
-        browser = p.chromium.launch(headless=HEADLESS, channel=BROWSER_CHANNEL or None)
-        context = browser.new_context(
-            viewport={"width": 1100, "height": 1500},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        )
-        page = context.new_page()
-
-        # ---- search mode — stock the queue before anything else ----
-        for query in SEARCH_QUERIES:
-            try:
-                queue.extend(search_scribd(page, query, seen, queued_ids))
-            except Exception as e:
-                print(f"   ! Alain's search for '{query}' failed: {e}")
-            time.sleep(2 + random.uniform(0, 1))
-
-        print(f"\nAlain's queue is stocked: {len(queue)} document(s) to check")
-
-        try:
-            while queue and (max_total is None or processed < max_total):
-                if TIME_CAP_MINUTES and (time.time() - started) >= TIME_CAP_MINUTES * 60:
-                    print(f"\n[time cap] {TIME_CAP_MINUTES:g} minute(s) reached — "
-                          f"Alain packs up. Everything captured so far is safe.")
-                    break
-                url = queue.pop(0)
-                doc_id = doc_id_from(url)
-                if not doc_id or doc_id in seen:
-                    continue
-                seen.add(doc_id)
-                doc_name = title_from_url(url)
-
-                # ---- resume — skip what's already captured ----
-                if already_captured(doc_id):
-                    print(f"\n[skip] '{doc_name}' is already captured — "
-                          f"Alain checks its links and moves on")
-                    try:
-                        fresh, ignored = find_new_links(page, url, seen, queued_ids)
-                        queue.extend(fresh)
-                        note = f" ({ignored} junk/off-topic bounced)" if ignored else ""
-                        print(f"   queued {len(fresh)} new document link(s) — "
-                              f"{len(queue)} waiting{note}")
-                    except Exception as e:
-                        print(f"   ! Alain couldn't collect links: {e}")
-                    time.sleep(2 + random.uniform(0, 1))
-                    continue
-
-                processed += 1
-                label = f"[{processed}]" if unlimited else f"[{processed}/{max_total}]"
-                print(f"\n{label} Alain is on: {url}")
-
-                # 1) screenshot this document (v2: adverts go to review/)
+            def on_dialog(dialog):
                 try:
-                    n, rj = screenshot_document(page, doc_id, PAGES_PER_DOC, doc_name)
-                    total_saved += n
-                    total_review += rj
-                    print(f"   -> {n} paper page(s) kept, {rj} junk page(s) -> review/")
-                except Exception as e:
-                    print(f"   ! Alain couldn't screenshot this document: {e}")
-
-                # 2) find more documents to visit
-                if max_total is None or processed < max_total:
+                    print(f"   [pop-up] {(dialog.message or '')[:60]!r} — closed")
+                except Exception:
+                    pass
+                try:
+                    dialog.accept()
+                except Exception:
                     try:
-                        fresh, ignored = find_new_links(page, url, seen, queued_ids)
-                        queue.extend(fresh)
-                        note = f" ({ignored} junk/off-topic bounced)" if ignored else ""
-                        print(f"   queued {len(fresh)} new document link(s) — "
-                              f"{len(queue)} waiting{note}")
+                        dialog.dismiss()
+                    except Exception:
+                        pass
+            page.on("dialog", on_dialog)
+
+            print(f"Opening {START_URL}")
+            try:
+                page.goto(START_URL, wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                print(f"   [!] opening failed: {e}")
+
+            print(
+                "\nIN THE BROWSER WINDOW (that's Alain's browser):\n"
+                "  * FIRST TIME: log into YOUR Scribd account — Alain\n"
+                "    REMEMBERS your login between runs (alain_profile/).\n"
+                "  * search e.g. 'cameroon HND accountancy past questions',\n"
+                "  * open a paper, EYEBALL it — is it the right one?\n"
+                "Then press ENTER here and Alain shoots every page.\n"
+                "Open the next paper, ENTER again. 'q' when you're done.")
+
+            while True:
+                try:
+                    raw = input(
+                        f"\n[ENTER]=shoot this paper | goto URL | list | q=done\n"
+                        f">> ({page.url[:55]}) ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    break
+                cmd = raw.lower()
+
+                if cmd in ("q", "quit", "exit"):
+                    break
+
+                if cmd.startswith("goto") and len(raw.split()) > 1:
+                    url = raw.split(None, 1)[1].strip()
+                    if not url.startswith("http"):
+                        url = START_URL.rstrip("/") + "/" + url.lstrip("/")
+                    try:
+                        page.goto(url, wait_until="domcontentloaded",
+                                  timeout=60000)
+                        settle(page)
+                        print(f"   now on: {page.url[:70]}")
                     except Exception as e:
-                        print(f"   ! Alain couldn't collect links: {e}")
+                        print(f"   [!] {e}")
 
-                # polite pause, with a human-ish wobble so it isn't robotic
-                pause = DELAY_SECONDS + random.uniform(0, JITTER_SECONDS)
-                time.sleep(pause)
+                elif cmd == "list":
+                    show_saved()
 
-        except KeyboardInterrupt:
-            print("\n\n[STOP] Stopped by you! Everything captured so far is safe.")
-            print("       Rerun alain.py anytime — Alain picks up right where he left off.")
-        finally:
-            browser.close()
+                elif cmd == "":
+                    shoot_current(page)
 
-    print(f"\nAlain is done — {total_saved} paper page(s) kept this run")
-    print(f"                 {total_review} advert/junk page(s) parked in '{REVIEW_DIR}/'")
-    print("                 (nothing deleted — check review/ if something looks missing)")
-    print(f"Paper pages live in '{OUTPUT_DIR}/'")
+                else:
+                    print("   ? commands: ENTER (shoot) | goto URL | list | q")
+
+            context.close()
+
+    except KeyboardInterrupt:
+        print("\n[stop] Ctrl+C — everything captured so far is safe.")
+
+    write_manifest()
 
 
 if __name__ == "__main__":

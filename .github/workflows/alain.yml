@@ -38,12 +38,12 @@ jobs:
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
-      - name: Alain captures the papers
+      - name: Alain probes Scribd (robot mode)
         env:
           ALAIN_MAX_LINKS: ${{ github.event.inputs.max_links || '5' }}
           ALAIN_PAGES_PER_DOC: ${{ github.event.inputs.pages_per_doc || '0' }}
           ALAIN_TIME_CAP: ${{ github.event.inputs.time_cap || '180' }}
-        run: python alain.py
+        run: python alain_auto.py
 
       - name: Commit screenshots
         run: |
