@@ -178,7 +178,8 @@ def launch_browser(p):
             return ctx, name
         except Exception as e:
             last_err = e
-            print(f"   [browser] {ch or 'bundled-chromium'} not available")
+            print(f"   [browser] {ch or 'bundled-chromium'} not available "
+                  f"({str(e).splitlines()[0][:80]})")
     raise SystemExit(
         "\nAlain couldn't start any browser (tried Edge, Chrome, Chromium).\n"
         "Fix — install the bundled browser once:\n"
